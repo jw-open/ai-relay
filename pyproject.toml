@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-relay"
+version = "0.1.0"
+description = "WebSocket relay that bridges AI coding agent CLIs (Claude Code, Codex, Gemini CLI, Snowflake Cortex) to any web interface — stream reasoning, tool calls, and file changes in real time."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "OhWise", email = "hello@ohwise.ai" }]
+keywords = ["claude-code", "codex", "gemini", "ai-agent", "websocket", "relay", "coding-agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=12.0",
+    "click>=8.0",
+    "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "httpx"]
+
+[project.scripts]
+agent-relay = "agent_relay.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jw-open/agent-relay"
+Repository = "https://github.com/jw-open/agent-relay"
+Issues = "https://github.com/jw-open/agent-relay/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent_relay*"]
