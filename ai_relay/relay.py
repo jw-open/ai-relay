@@ -184,7 +184,7 @@ class RelayServer:
             await session.stop()
 
     async def serve(self) -> None:
-        logger.info("agent-relay listening on ws://%s:%d", self.host, self.port)
+        logger.info("ai-relay listening on ws://%s:%d", self.host, self.port)
         async with websockets.serve(self.handle, self.host, self.port):
             await asyncio.Future()  # run forever
 
