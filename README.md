@@ -1,18 +1,18 @@
-# agent-relay
+# ai-relay
 
 > WebSocket relay that bridges AI coding agent CLIs (Claude Code, Codex, Gemini CLI, Snowflake Cortex, and more) to any web interface — stream reasoning, tool calls, and file changes in real time.
 
 ## Install
 
 ```bash
-pip install agent-relay
+pip install ai-relay
 ```
 
 ## Quick start
 
 ```bash
 # Start the relay server (default: ws://0.0.0.0:8765)
-agent-relay --port 8765
+ai-relay --port 8765
 ```
 
 Then connect from OhWise Lab (or any WebSocket client) and send a handshake:
@@ -68,7 +68,7 @@ To send CLI commands (e.g. `/compact`, `/clear`):
 ## Python API
 
 ```python
-from agent_relay import RelayServer
+from ai_relay import RelayServer
 
 server = RelayServer(host="0.0.0.0", port=8765)
 server.run()

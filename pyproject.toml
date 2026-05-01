@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-relay"
-version = "0.1.0"
+version = "0.1.1"
 description = "WebSocket relay that bridges AI coding agent CLIs (Claude Code, Codex, Gemini CLI, Snowflake Cortex) to any web interface — stream reasoning, tool calls, and file changes in real time."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -32,7 +32,7 @@ dependencies = [
 dev = ["pytest", "pytest-asyncio", "httpx"]
 
 [project.scripts]
-agent-relay = "agent_relay.cli:main"
+agent-relay = "ai_relay.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/jw-open/agent-relay"
@@ -41,4 +41,4 @@ Issues = "https://github.com/jw-open/agent-relay/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agent_relay*"]
+include = ["ai_relay*"]
