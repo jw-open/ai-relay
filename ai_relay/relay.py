@@ -15,8 +15,8 @@ from websockets.exceptions import ConnectionClosed
 from websockets.server import WebSocketServerProtocol
 
 from .adapters import get_adapter, BaseAdapter
+from .adapters.base import AgentRuntime
 from .events import EventType, RelayEvent
-from .pty_session import PtySession, clean_pty_output
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +35,16 @@ class RelaySession:
         folder: str,
         model: Optional[str] = None,
         extra_args: Optional[list[str]] = None,
+        config: Optional[dict[str, Any]] = None,
     ):
         self.session_id = session_id
         self.tool = tool
         self.folder = os.path.abspath(folder)
         self.model = model
         self.extra_args = extra_args or []
+        self.config = config or {}
         self._adapter: type[BaseAdapter] = get_adapter(tool)
-        self._pty: Optional[PtySession] = None
+        self._runtime: Optional[AgentRuntime] = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -51,9 +53,10 @@ class RelaySession:
         cmd = self._adapter.build_command(self.folder, self.model, self.extra_args)
         logger.info("[%s] Starting: %s in %s", self.session_id, cmd, self.folder)
 
-        env = self._build_env(cmd[0])
+        env = self._build_env(cmd[0]) if cmd else self._build_env("")
         logger.debug("[%s] PATH: %s", self.session_id, env.get("PATH", "(not set)"))
-        logger.debug("[%s] resolved binary: %s", self.session_id, shutil.which(cmd[0], path=env.get("PATH")))
+        if cmd:
+            logger.debug("[%s] resolved binary: %s", self.session_id, shutil.which(cmd[0], path=env.get("PATH")))
 
         error = self._preflight(cmd, env)
         if error:
@@ -71,14 +74,15 @@ class RelaySession:
         ))
 
         try:
-            self._pty = PtySession(
-                cmd=cmd,
-                cwd=self.folder,
-                env=env,
+            self._runtime = self._adapter.create_runtime(
                 session_id=self.session_id,
-                auto_confirm_delay=0,
+                folder=self.folder,
+                model=self.model,
+                extra_args=self.extra_args,
+                env=env,
+                config=self.config,
             )
-            await self._pty.start()
+            await self._runtime.start()
         except FileNotFoundError:
             await self._send(ws, RelayEvent(
                 type=EventType.ERROR,
@@ -87,20 +91,26 @@ class RelaySession:
             ))
             return
 
-        # Run the PTY reader and WS input pump concurrently.
-        # PTYs combine stdout/stderr and often emit screen redraw chunks without newlines.
+        # Run the process/API reader and WS input pump concurrently. Some
+        # structured adapters are persistent and only emit after client input,
+        # so either side ending should tear down the session.
         ws_task = asyncio.create_task(self._read_ws(ws))
+        runtime_task = asyncio.create_task(self._read_runtime(ws))
         try:
-            await self._read_pty(ws)
+            done, pending = await asyncio.wait(
+                {ws_task, runtime_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                task.result()
         finally:
-            ws_task.cancel()
-            try:
-                await ws_task
-            except asyncio.CancelledError:
-                pass
+            for task in (ws_task, runtime_task):
+                task.cancel()
+            await asyncio.gather(ws_task, runtime_task, return_exceptions=True)
+            await self.stop()
 
-        if self._pty and self._pty._process:
-            exit_code = await self._pty._process.wait()
+        if self._runtime:
+            exit_code = await self._runtime.wait()
         else:
             exit_code = None
         await self._send(ws, RelayEvent(
@@ -111,13 +121,16 @@ class RelaySession:
         logger.info("[%s] Process exited with code %s", self.session_id, exit_code)
 
     async def stop(self) -> None:
-        if self._pty:
-            await self._pty.stop()
+        if self._runtime:
+            await self._runtime.stop()
 
     def _build_env(self, binary: str) -> dict[str, str]:
         """Copy os.environ and auto-expand PATH with nvm/node bin dirs if binary not found."""
         env = os.environ.copy()
         env.setdefault("TERM", "xterm-256color")
+
+        if not binary:
+            return env
 
         # If binary is already findable, nothing to do.
         if shutil.which(binary, path=env.get("PATH")) is not None:
@@ -152,9 +165,9 @@ class RelaySession:
     def _preflight(self, cmd: list[str], env: dict[str, str]) -> Optional[str]:
         if not os.path.isdir(self.folder):
             return f"Working folder not found: {self.folder}"
-        if not cmd:
+        if not cmd and self._adapter.requires_executable:
             return "Adapter produced an empty command."
-        if shutil.which(cmd[0], path=env.get("PATH")) is None:
+        if cmd and self._adapter.requires_executable and shutil.which(cmd[0], path=env.get("PATH")) is None:
             return (
                 f"Command not found: {cmd[0]}. Is it installed and on PATH?\n"
                 f"PATH searched: {env.get('PATH', '(not set)')}"
@@ -163,21 +176,16 @@ class RelaySession:
 
     # ── I/O pumps ─────────────────────────────────────────────────────────────
 
-    async def _read_pty(self, ws: WebSocketServerProtocol) -> None:
+    async def _read_runtime(self, ws: WebSocketServerProtocol) -> None:
         while True:
-            if not self._pty:
+            if not self._runtime:
                 break
-            chunk = await self._pty.read()
-            if not chunk:
-                logger.debug("[%s] PTY EOF", self.session_id)
+            event = await self._runtime.read_event()
+            if not event:
+                logger.debug("[%s] runtime EOF", self.session_id)
                 break
-            logger.debug("[%s] PTY raw (%d bytes): %r", self.session_id, len(chunk), chunk)
-            cleaned = clean_pty_output(chunk)
-            logger.debug("[%s] PTY cleaned: %r", self.session_id, cleaned)
-            decoded = self._adapter.postprocess_line(cleaned)
-            if not decoded:
+            if event.text == "" and event.raw is None and event.content is None:
                 continue
-            event = RelayEvent.from_raw(self.session_id, "stdout", decoded)
             logger.debug("[%s] sending event: %s", self.session_id, event.to_json()[:200])
             await self._send(ws, event)
 
@@ -193,17 +201,16 @@ class RelaySession:
                 msg = {"text": raw}
 
             text = msg.get("text", "")
-            if not text:
+            if not text and "type" not in msg and "content" not in msg:
                 continue
 
-            processed = self._adapter.preprocess_input(text)
-            logger.debug("[%s] WS -> PTY: %r", self.session_id, processed[:100])
-            if self._pty:
-                await self._pty.write(processed.encode())
+            logger.debug("[%s] WS -> runtime: %r", self.session_id, msg)
+            if self._runtime:
+                await self._runtime.handle_client_message(msg)
                 await self._send(ws, RelayEvent(
                     type=EventType.INPUT_ACK,
                     session_id=self.session_id,
-                    text=text,
+                    text=text or msg.get("type"),
                 ))
 
     @staticmethod
@@ -250,6 +257,7 @@ class RelayServer:
             folder=config.get("folder", "."),
             model=config.get("model"),
             extra_args=config.get("extra_args"),
+            config=config,
         )
         try:
             await session.start(ws)

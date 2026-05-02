@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 
 class EventType(str, Enum):
@@ -22,6 +22,14 @@ class EventType(str, Enum):
     TOOL_RESULT = "tool_result"    # result of a tool call
     FILE_DIFF = "file_diff"        # file was created/edited
     RESPONSE = "response"          # final answer text
+    ASSISTANT_MESSAGE = "assistant_message"
+    USER_MESSAGE = "user_message"
+    STREAM_EVENT = "stream_event"
+    STATUS = "status"
+    PERMISSION_REQUEST = "permission_request"
+    PERMISSION_CANCELLED = "permission_cancelled"
+    CONTROL_RESPONSE = "control_response"
+    TOOL_PROGRESS = "tool_progress"
     # Status / warnings
     QUOTA_WARNING = "quota_warning"
     CONTEXT_WARNING = "context_warning"   # context window nearing limit
@@ -45,6 +53,11 @@ class RelayEvent:
     context_pct: Optional[int] = None
     exit_code: Optional[int] = None
     metadata: Optional[dict] = None
+    request_id: Optional[str] = None
+    tool_use_id: Optional[str] = None
+    content: Optional[Any] = None
+    raw: Optional[dict] = None
+    status: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps({k: v for k, v in asdict(self).items() if v is not None})

@@ -1,6 +1,7 @@
 from .base import BaseAdapter
 from .claude_code import ClaudeCodeAdapter
 from .codex import CodexAdapter
+from .cortex import CortexAdapter
 from .gemini import GeminiAdapter
 from .generic import GenericAdapter
 
@@ -9,7 +10,7 @@ ADAPTERS: dict[str, type[BaseAdapter]] = {
     "claude-code": ClaudeCodeAdapter,
     "codex": CodexAdapter,
     "gemini": GeminiAdapter,
-    "cortex": GenericAdapter,
+    "cortex": CortexAdapter,
     "generic": GenericAdapter,
 }
 

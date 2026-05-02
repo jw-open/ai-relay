@@ -2,7 +2,79 @@
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
+
+from ..events import EventType, RelayEvent
+from ..pty_session import clean_pty_output
+from ..transports import PtyTransport
+
+
+class AgentRuntime(ABC):
+    """Running adapter instance for one relay session."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+
+    @abstractmethod
+    async def start(self) -> None:
+        ...
+
+    @abstractmethod
+    async def read_event(self) -> Optional[RelayEvent]:
+        ...
+
+    @abstractmethod
+    async def handle_client_message(self, msg: dict[str, Any]) -> None:
+        ...
+
+    @abstractmethod
+    async def stop(self) -> None:
+        ...
+
+    @abstractmethod
+    async def wait(self) -> Optional[int]:
+        ...
+
+
+class PtyAgentRuntime(AgentRuntime):
+    """Default runtime that bridges client text to an interactive PTY."""
+
+    def __init__(
+        self,
+        session_id: str,
+        cmd: list[str],
+        cwd: str,
+        env: dict[str, str],
+        adapter: type["BaseAdapter"],
+    ):
+        super().__init__(session_id)
+        self.adapter = adapter
+        self.transport = PtyTransport(cmd, cwd, env, session_id)
+
+    async def start(self) -> None:
+        await self.transport.start()
+
+    async def read_event(self) -> Optional[RelayEvent]:
+        chunk = await self.transport.read()
+        if not chunk:
+            return None
+        cleaned = clean_pty_output(chunk)
+        decoded = self.adapter.postprocess_line(cleaned)
+        if not decoded:
+            return RelayEvent(type=EventType.STDOUT, session_id=self.session_id, text="")
+        return RelayEvent.from_raw(self.session_id, "stdout", decoded)
+
+    async def handle_client_message(self, msg: dict[str, Any]) -> None:
+        text = msg.get("text", "")
+        if text:
+            processed = self.adapter.preprocess_input(str(text))
+            await self.transport.write(processed.encode())
+
+    async def stop(self) -> None:
+        await self.transport.stop()
+
+    async def wait(self) -> Optional[int]:
+        return await self.transport.wait()
 
 
 class BaseAdapter(ABC):
@@ -14,6 +86,8 @@ class BaseAdapter(ABC):
     """
 
     tool_name: str = "generic"
+    protocol: str = "pty"
+    requires_executable: bool = True
 
     @classmethod
     @abstractmethod
@@ -42,3 +116,21 @@ class BaseAdapter(ABC):
         # Strip ANSI escape codes
         ansi = re.compile(r"\x1b\[[0-9;]*m|\x1b\[[0-9;]*[A-Za-z]|\r")
         return ansi.sub("", line)
+
+    @classmethod
+    def create_runtime(
+        cls,
+        session_id: str,
+        folder: str,
+        model: Optional[str],
+        extra_args: Optional[list[str]],
+        env: dict[str, str],
+        config: Optional[dict[str, Any]] = None,
+    ) -> AgentRuntime:
+        return PtyAgentRuntime(
+            session_id=session_id,
+            cmd=cls.build_command(folder, model, extra_args),
+            cwd=folder,
+            env=env,
+            adapter=cls,
+        )
