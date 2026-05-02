@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import logging
 import os
 import pty
 import re
 import termios
 import time
 from typing import Optional, Callable, Awaitable
+
+logger = logging.getLogger(__name__)
 
 # ── ANSI / VT100 escape sequence stripping ────────────────────────────────────
 # Covers: CSI (with >, <, = in param area), OSC, DCS, two-char escapes,
@@ -99,6 +102,9 @@ class PtySession:
     async def start(self) -> None:
         """Open PTY and spawn subprocess."""
         self._loop = asyncio.get_running_loop()
+        logger.debug("[%s] PTY start: cmd=%s cwd=%s uid=%s gid=%s",
+                     self.session_id, self.cmd, self.cwd, self.uid, self.gid)
+        logger.debug("[%s] PTY env PATH: %s", self.session_id, self.env.get("PATH", "(not set)"))
         master_fd, slave_fd = pty.openpty()
         os.set_blocking(master_fd, False)
         self._master_fd = master_fd
@@ -115,6 +121,7 @@ class PtySession:
             preexec_fn=preexec,
         )
         os.close(slave_fd)  # parent only needs master end
+        logger.debug("[%s] PTY spawned pid=%s", self.session_id, self._process.pid)
 
         # Auto-confirm: send Enter after delay to dismiss startup wizards
         if self.auto_confirm_delay > 0:

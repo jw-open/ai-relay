@@ -6,10 +6,12 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 from websockets.server import WebSocketServerProtocol
 
 from .adapters import get_adapter, BaseAdapter
@@ -49,6 +51,19 @@ class RelaySession:
         cmd = self._adapter.build_command(self.folder, self.model, self.extra_args)
         logger.info("[%s] Starting: %s in %s", self.session_id, cmd, self.folder)
 
+        env = self._build_env(cmd[0])
+        logger.debug("[%s] PATH: %s", self.session_id, env.get("PATH", "(not set)"))
+        logger.debug("[%s] resolved binary: %s", self.session_id, shutil.which(cmd[0], path=env.get("PATH")))
+
+        error = self._preflight(cmd, env)
+        if error:
+            await self._send(ws, RelayEvent(
+                type=EventType.ERROR,
+                session_id=self.session_id,
+                text=error,
+            ))
+            return
+
         await self._send(ws, RelayEvent(
             type=EventType.SESSION_START,
             session_id=self.session_id,
@@ -56,8 +71,6 @@ class RelaySession:
         ))
 
         try:
-            env = os.environ.copy()
-            env.setdefault("TERM", "xterm-256color")
             self._pty = PtySession(
                 cmd=cmd,
                 cwd=self.folder,
@@ -101,6 +114,53 @@ class RelaySession:
         if self._pty:
             await self._pty.stop()
 
+    def _build_env(self, binary: str) -> dict[str, str]:
+        """Copy os.environ and auto-expand PATH with nvm/node bin dirs if binary not found."""
+        env = os.environ.copy()
+        env.setdefault("TERM", "xterm-256color")
+
+        # If binary is already findable, nothing to do.
+        if shutil.which(binary, path=env.get("PATH")) is not None:
+            return env
+
+        # Auto-detect: scan ~/.nvm/versions/node/*/bin for the binary.
+        nvm_root = os.path.expanduser("~/.nvm/versions/node")
+        extra: list[str] = []
+        if os.path.isdir(nvm_root):
+            try:
+                for version_dir in sorted(os.listdir(nvm_root), reverse=True):
+                    bin_dir = os.path.join(nvm_root, version_dir, "bin")
+                    if os.path.isfile(os.path.join(bin_dir, binary)):
+                        extra.append(bin_dir)
+                        logger.debug("auto-detected nvm bin dir for %s: %s", binary, bin_dir)
+                        break
+            except OSError:
+                pass
+
+        # Also check ~/.local/bin, /usr/local/bin as fallbacks.
+        for d in [os.path.expanduser("~/.local/bin"), "/usr/local/bin"]:
+            if os.path.isfile(os.path.join(d, binary)) and d not in extra:
+                extra.append(d)
+
+        if extra:
+            current = env.get("PATH", "")
+            env["PATH"] = ":".join(extra + ([current] if current else []))
+            logger.debug("expanded PATH with: %s", extra)
+
+        return env
+
+    def _preflight(self, cmd: list[str], env: dict[str, str]) -> Optional[str]:
+        if not os.path.isdir(self.folder):
+            return f"Working folder not found: {self.folder}"
+        if not cmd:
+            return "Adapter produced an empty command."
+        if shutil.which(cmd[0], path=env.get("PATH")) is None:
+            return (
+                f"Command not found: {cmd[0]}. Is it installed and on PATH?\n"
+                f"PATH searched: {env.get('PATH', '(not set)')}"
+            )
+        return None
+
     # ── I/O pumps ─────────────────────────────────────────────────────────────
 
     async def _read_pty(self, ws: WebSocketServerProtocol) -> None:
@@ -109,16 +169,22 @@ class RelaySession:
                 break
             chunk = await self._pty.read()
             if not chunk:
+                logger.debug("[%s] PTY EOF", self.session_id)
                 break
-            decoded = self._adapter.postprocess_line(clean_pty_output(chunk))
+            logger.debug("[%s] PTY raw (%d bytes): %r", self.session_id, len(chunk), chunk)
+            cleaned = clean_pty_output(chunk)
+            logger.debug("[%s] PTY cleaned: %r", self.session_id, cleaned)
+            decoded = self._adapter.postprocess_line(cleaned)
             if not decoded:
                 continue
             event = RelayEvent.from_raw(self.session_id, "stdout", decoded)
+            logger.debug("[%s] sending event: %s", self.session_id, event.to_json()[:200])
             await self._send(ws, event)
 
     async def _read_ws(self, ws: WebSocketServerProtocol) -> None:
         """Forward WebSocket messages to the subprocess stdin."""
         async for raw in ws:
+            logger.debug("[%s] WS recv: %r", self.session_id, raw[:200] if isinstance(raw, str) else raw)
             try:
                 msg = json.loads(raw) if isinstance(raw, str) else {}
             except json.JSONDecodeError:
@@ -129,6 +195,7 @@ class RelaySession:
                 continue
 
             processed = self._adapter.preprocess_input(text)
+            logger.debug("[%s] WS -> PTY: %r", self.session_id, processed[:100])
             if self._pty:
                 await self._pty.write(processed.encode())
                 await self._send(ws, RelayEvent(
@@ -160,14 +227,19 @@ class RelayServer:
     async def handle(self, ws: WebSocketServerProtocol) -> None:
         # First message must be the session config
         try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=10)
-            config = json.loads(raw)
+            config = await self._recv_handshake(ws)
+        except ConnectionClosed:
+            logger.debug("Client disconnected before sending handshake")
+            return
+        except asyncio.TimeoutError:
+            await self._send_error(ws, "Handshake timeout: first message must be session config JSON")
+            return
+        except ValueError as exc:
+            await self._send_error(ws, f"Invalid handshake: {exc}")
+            return
         except Exception as exc:
-            await ws.send(RelayEvent(
-                type=EventType.ERROR,
-                session_id="",
-                text=f"Invalid handshake: {exc}",
-            ).to_json())
+            logger.exception("Unexpected handshake failure")
+            await self._send_error(ws, f"Invalid handshake: {exc}")
             return
 
         session = RelaySession(
@@ -181,6 +253,34 @@ class RelayServer:
             await session.start(ws)
         finally:
             await session.stop()
+
+    async def _recv_handshake(self, ws: WebSocketServerProtocol) -> dict[str, Any]:
+        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+        if not isinstance(raw, str):
+            raise ValueError("first message must be a JSON text frame")
+
+        try:
+            config = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(exc.msg) from exc
+
+        if not isinstance(config, dict):
+            raise ValueError("handshake must be a JSON object")
+
+        extra_args = config.get("extra_args")
+        if extra_args is not None and not isinstance(extra_args, list):
+            raise ValueError("extra_args must be a list of strings")
+        if extra_args is not None and not all(isinstance(arg, str) for arg in extra_args):
+            raise ValueError("extra_args must be a list of strings")
+
+        return config
+
+    async def _send_error(self, ws: WebSocketServerProtocol, text: str) -> None:
+        await ws.send(RelayEvent(
+            type=EventType.ERROR,
+            session_id="",
+            text=text,
+        ).to_json())
 
     async def serve(self) -> None:
         logger.info("ai-relay listening on ws://%s:%d", self.host, self.port)
