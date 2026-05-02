@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # and miscellaneous control characters (keep \n, \r, \t).
 CTRL_RE = re.compile(
     r"\x1b\[[0-9;?><= ]*[A-Za-z@`]"        # CSI: [?25h, [>0q, [2004h, [0m …
-    r"|\x1b\][^\x07\x1b]*[\x07\x1b\\]"     # OSC sequences
+    r"|\x1b\][^\x07\x1b]*(?:[\x07\x1b\\]|$)"  # OSC sequences (incl. unterminated at chunk end)
     r"|\x1bP[^\x1b]*\x1b\\"                # DCS sequences
     r"|\x1b[^[\]P]"                         # Two-char escapes: \x1bM, \x1b=, \x1b>
     r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"  # Other control chars (keep \n, \r, \t)
@@ -42,6 +42,13 @@ CTRL_RE = re.compile(
 # We replace each with the appropriate number of spaces before stripping.
 _CURSOR_RIGHT_RE = re.compile(r"\x1b\[(\d*)C")
 
+# OSC 8 terminal hyperlinks: \x1b]8;params;URL\x07  or  \x1b]8;params;URL\x1b\
+# Codex (and other modern CLIs) wrap URLs in these so terminals render them clickable.
+# We extract the URL from the escape sequence so it's visible as plain text.
+# The closing tag \x1b]8;;\x07 has an empty URL → replaced with empty string.
+_OSC8_BEL_RE = re.compile(r"\x1b\]8;[^;]*;([^\x07]*)\x07")   # BEL-terminated
+_OSC8_ST_RE  = re.compile(r"\x1b\]8;[^;]*;([^\x1b]*)\x1b\\") # ST-terminated
+
 
 def _cursor_right_to_spaces(m: re.Match) -> str:
     n = int(m.group(1)) if m.group(1) else 1
@@ -51,6 +58,11 @@ def _cursor_right_to_spaces(m: re.Match) -> str:
 def clean_pty_output(chunk: bytes) -> str:
     """Decode a raw PTY chunk, strip terminal control sequences, normalise line endings."""
     raw = chunk.decode("utf-8", errors="replace")
+    # Extract URLs from OSC 8 hyperlinks BEFORE general stripping so URLs are preserved.
+    # Both BEL (\x07) and ST (\x1b\) terminators are common; process ST first to avoid
+    # partial matches (ST starts with \x1b which BEL pattern doesn't consume).
+    raw = _OSC8_ST_RE.sub(lambda m: m.group(1), raw)
+    raw = _OSC8_BEL_RE.sub(lambda m: m.group(1), raw)
     # Replace cursor-right with spaces before stripping (TUI word spacing)
     raw = _CURSOR_RIGHT_RE.sub(_cursor_right_to_spaces, raw)
     cleaned = CTRL_RE.sub("", raw)
