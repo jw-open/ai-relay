@@ -19,6 +19,7 @@ import logging
 import os
 import pty
 import re
+import struct
 import termios
 import time
 from typing import Optional, Callable, Awaitable
@@ -99,6 +100,8 @@ class PtySession:
         gid: Optional[int] = None,
         session_id: str = "",
         auto_confirm_delay: float = 2.0,
+        cols: int = 500,
+        rows: int = 50,
     ):
         self.cmd = cmd
         self.cwd = cwd
@@ -107,6 +110,8 @@ class PtySession:
         self.gid = gid
         self.session_id = session_id
         self.auto_confirm_delay = auto_confirm_delay
+        self.cols = cols
+        self.rows = rows
 
         self._master_fd: Optional[int] = None
         self._process: Optional[asyncio.subprocess.Process] = None
@@ -121,6 +126,12 @@ class PtySession:
         master_fd, slave_fd = pty.openpty()
         os.set_blocking(master_fd, False)
         self._master_fd = master_fd
+
+        # Set terminal window size — must happen before exec so the process
+        # sees the correct dimensions from the start.  Wide cols prevent long
+        # URLs (e.g. OAuth) and other output from being line-wrapped.
+        winsize = struct.pack("HHHH", self.rows, self.cols, 0, 0)
+        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
         preexec = self._make_preexec(slave_fd)
 
