@@ -186,7 +186,9 @@ class RelaySession:
         async for raw in ws:
             logger.debug("[%s] WS recv: %r", self.session_id, raw[:200] if isinstance(raw, str) else raw)
             try:
-                msg = json.loads(raw) if isinstance(raw, str) else {}
+                parsed = json.loads(raw) if isinstance(raw, str) else {}
+                # json.loads may return a non-dict (int, list…) for bare values like "1"
+                msg = parsed if isinstance(parsed, dict) else {"text": raw}
             except json.JSONDecodeError:
                 msg = {"text": raw}
 

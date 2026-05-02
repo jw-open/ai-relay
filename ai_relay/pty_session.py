@@ -36,12 +36,25 @@ CTRL_RE = re.compile(
     r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"  # Other control chars (keep \n, \r, \t)
 )
 
+# Cursor-right: \x1b[NC means "move cursor right N columns" — TUI apps use
+# this to lay out words with spacing instead of literal space characters.
+# We replace each with the appropriate number of spaces before stripping.
+_CURSOR_RIGHT_RE = re.compile(r"\x1b\[(\d*)C")
+
+
+def _cursor_right_to_spaces(m: re.Match) -> str:
+    n = int(m.group(1)) if m.group(1) else 1
+    return " " * n
+
 
 def clean_pty_output(chunk: bytes) -> str:
     """Decode a raw PTY chunk, strip terminal control sequences, normalise line endings."""
     raw = chunk.decode("utf-8", errors="replace")
+    # Replace cursor-right with spaces before stripping (TUI word spacing)
+    raw = _CURSOR_RIGHT_RE.sub(_cursor_right_to_spaces, raw)
     cleaned = CTRL_RE.sub("", raw)
-    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    # \r\r\n (double CR before LF) → single \n, then normalise remaining endings
+    cleaned = cleaned.replace("\r\r\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
     return cleaned
 
 
