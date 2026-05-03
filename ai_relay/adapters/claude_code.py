@@ -19,8 +19,14 @@ class ClaudeStructuredRuntime(AgentRuntime):
         cmd: list[str],
         cwd: str,
         env: dict[str, str],
+        claude_session_id: Optional[str] = None,
     ):
         super().__init__(session_id)
+        # claude_session_id is Claude Code's own conversation ID (captured from
+        # system/init on the first turn).  It goes into the stream-json stdin payload
+        # and is separate from the relay's session_id (which is a DB UUID).
+        # None on first turn means: start a new conversation.
+        self._claude_session_id = claude_session_id
         self.transport = StructuredProcessTransport(cmd, cwd, env)
         self._stderr_queue: asyncio.Queue[RelayEvent] = asyncio.Queue()
         self._event_queue: asyncio.Queue[RelayEvent] = asyncio.Queue()
@@ -104,7 +110,9 @@ class ClaudeStructuredRuntime(AgentRuntime):
     async def _send_user_message(self, content: Any, uuid: Optional[str] = None) -> None:
         payload: dict[str, Any] = {
             "type": "user",
-            "session_id": self.session_id,
+            # Use Claude Code's own conversation ID, NOT the relay DB session UUID.
+            # On the first turn _claude_session_id is None → empty string → new conversation.
+            "session_id": self._claude_session_id or "",
             "message": {"role": "user", "content": content},
             "parent_tool_use_id": None,
         }

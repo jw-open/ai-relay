@@ -67,12 +67,8 @@ class PerTurnRuntime(AgentRuntime):
     # ── AgentRuntime interface ────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Queue the SESSION_START event; subprocess starts on first message."""
-        await self._events.put(RelayEvent(
-            type=EventType.SESSION_START,
-            session_id=self.session_id,
-            metadata={"tool": self.tool, "cmd": self._base_cmd, "cwd": self._cwd},
-        ))
+        """No-op: relay.py already emits SESSION_START before calling start().
+        Subprocess starts on first user message via _run_turn()."""
 
     async def read_event(self) -> Optional[RelayEvent]:
         return await self._events.get()
@@ -137,7 +133,17 @@ class PerTurnRuntime(AgentRuntime):
             self.session_id, cmd[0], self._agent_session_id,
         )
 
-        self._current = self._runtime_class(self.session_id, cmd, self._cwd, self._env)
+        # Pass the captured Claude conversation ID so ClaudeStructuredRuntime
+        # sends the correct session_id in its stream-json stdin payload.
+        # On the first turn _agent_session_id is None → new conversation.
+        try:
+            self._current = self._runtime_class(
+                self.session_id, cmd, self._cwd, self._env,
+                claude_session_id=self._agent_session_id,
+            )
+        except TypeError:
+            # Fallback for runtimes that don't accept claude_session_id (e.g. Gemini)
+            self._current = self._runtime_class(self.session_id, cmd, self._cwd, self._env)
         await self._current.start()
         await self._current.handle_client_message(msg)
 

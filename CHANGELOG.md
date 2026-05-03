@@ -4,6 +4,19 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.2] — 2026-05-03
+
+### Fixed
+- `PerTurnRuntime.start()` no longer queues a duplicate `SESSION_START` event.
+  `relay.py` already emits `SESSION_START` before calling `runtime.start()`,
+  so this caused two `session_start` events per connection in server mode.
+- `ClaudeStructuredRuntime`: `session_id` field in the stream-json stdin payload
+  now uses Claude Code's own conversation ID (captured from `system/init`), not
+  the relay's DB UUID. Previously, Claude Code tried to `--resume` the DB UUID
+  and errored with "No conversation found".
+
+---
+
 ## [0.4.1] — 2026-05-03
 
 ### Added
