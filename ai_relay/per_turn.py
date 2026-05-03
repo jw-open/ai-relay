@@ -184,6 +184,12 @@ class PerTurnRuntime(AgentRuntime):
                 if isinstance(p, dict) and p.get("type") in {"text", "input_text"}
             ]
             prompt = "\n".join(x for x in parts if x)
+            # Image-only message: treat as non-empty so the turn is executed
+            if not prompt and any(
+                isinstance(p, dict) and p.get("type") == "image"
+                for p in content
+            ):
+                prompt = "[image]"
         else:
             prompt = str(content)
         return prompt.strip() or None

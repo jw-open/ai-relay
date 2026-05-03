@@ -4,6 +4,15 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.3] — 2026-05-03
+
+### Fixed
+- `PerTurnRuntime._extract_prompt`: image-only content blocks (no text) now return
+  a non-empty sentinel `"[image]"` so the turn is executed. Previously the runtime
+  silently skipped image-only messages, causing the agent to hang indefinitely.
+
+---
+
 ## [0.4.2] — 2026-05-03
 
 ### Fixed
