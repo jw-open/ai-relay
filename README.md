@@ -161,6 +161,23 @@ To send CLI commands (e.g. `/compact`, `/clear`):
 | Snowflake Cortex | `CortexAdapter` | `"cortex"` |
 | Any CLI | `GenericAdapter` | `"generic"` |
 
+## Configuration reference (ohwise-lab-ctrl)
+
+When using ohwise-lab alongside ai-relay, all settings are controlled via environment variables — nothing is hardcoded:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LAB_MODE` | `single` | `single` = subprocesses in lab-ctrl; `multi` = per-user Docker containers |
+| `LAB_WORKSPACE_ROOT` | `/var/ohwise-lab-workspaces` | Host path for user workspace volumes |
+| `LAB_IMAGE` | `ohwise-lab-ctrl:local` | Docker image for user containers (must have ai-relay + CLIs installed) |
+| `LAB_NETWORK` | `lab-network` | Docker network user containers join. For Compose: `<project>_default` |
+| `LAB_CONTAINER_PORT` | `9000` | Internal port `ai-relay serve` listens on inside user containers |
+| `LAB_CONTAINER_USER` | `labuser` | OS user inside user containers |
+| `LAB_CONTAINER_HOME` | `/home/<LAB_CONTAINER_USER>` | Home dir inside user containers |
+| `LAB_CONTAINER_STARTUP_DELAY` | `1.5` | Seconds to wait for ai-relay to be ready after container start |
+| `LAB_CONTAINER_WS_TIMEOUT` | `15` | Seconds to wait for WebSocket connection to user container |
+| `LAB_IDLE_TIMEOUT_SECS` | `1800` | Seconds of inactivity before a user container is eligible for cleanup |
+
 ## Python API
 
 ```python
