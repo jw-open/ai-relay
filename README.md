@@ -10,9 +10,18 @@ pip install ai-relay
 
 ## Quick start
 
+### One-shot mode (local dev)
+
 ```bash
 # Start the relay server (default: ws://0.0.0.0:8765)
 ai-relay --port 8765
+```
+
+### Server mode (container / daemon)
+
+```bash
+# Persistent server — each WebSocket connection becomes one independent agent session
+ai-relay serve --port 9000
 ```
 
 Then connect from OhWise Lab (or any WebSocket client) and send a handshake:
@@ -22,6 +31,19 @@ Then connect from OhWise Lab (or any WebSocket client) and send a handshake:
 ```
 
 The relay streams structured JSON events over WebSocket and forwards your messages to the selected backend. Claude Code and Gemini use native JSONL process protocols, Codex uses the app-server JSON-RPC protocol, and Snowflake Cortex uses HTTP/SSE. The PTY bridge is retained only for generic/legacy CLI tools.
+
+## Running in a container
+
+`ai-relay serve` is designed to run inside a Docker container as a persistent daemon:
+
+```dockerfile
+FROM python:3.11-slim
+RUN pip install ai-relay
+# Install your AI CLI here (e.g. npm install -g @anthropic-ai/claude-code)
+CMD ["ai-relay", "serve", "--port", "9000"]
+```
+
+Each incoming WebSocket connection spawns an independent agent session. Multiple clients can connect simultaneously.
 
 ## Event types
 
@@ -147,6 +169,10 @@ from ai_relay import RelayServer
 server = RelayServer(host="0.0.0.0", port=8765)
 server.run()
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 
