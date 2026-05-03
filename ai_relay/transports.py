@@ -63,6 +63,11 @@ class StructuredProcessTransport:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self.env,
+            # Raise StreamReader line limit to 100 MB.
+            # Claude Code echoes the full user message (including base64 images) on
+            # stdout as a single JSON line.  The default 64 KB limit raises
+            # LimitOverrunError / ValueError for any image-containing turn.
+            limit=100 * 1024 * 1024,
         )
 
     async def readline(self) -> Optional[bytes]:

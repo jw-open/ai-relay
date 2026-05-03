@@ -4,6 +4,17 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.5] — 2026-05-03
+
+### Fixed
+- `StructuredProcessTransport.start()`: raised asyncio StreamReader `limit` from 64 KB
+  to 100 MB.  Claude Code echoes the full user message (including base64-encoded images)
+  as a single JSON line on stdout; the default 64 KB limit raised `LimitOverrunError` /
+  `ValueError` on any image-containing turn, causing the relay to silently drop the
+  response and leave the session hanging.
+
+---
+
 ## [0.4.4] — 2026-05-03
 
 ### Fixed
