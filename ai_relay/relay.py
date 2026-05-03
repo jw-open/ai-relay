@@ -318,7 +318,9 @@ class RelayServer:
 
     async def serve(self) -> None:
         logger.info("ai-relay listening on ws://%s:%d", self.host, self.port)
-        async with websockets.serve(self.handle, self.host, self.port):
+        # max_size raised to 50MB to support image attachment payloads (base64-encoded).
+        # The default 1MB limit causes WebSocket 1009 errors for images > ~750KB.
+        async with websockets.serve(self.handle, self.host, self.port, max_size=50 * 1024 * 1024):
             await asyncio.Future()  # run forever
 
     def run(self) -> None:

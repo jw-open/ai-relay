@@ -4,6 +4,15 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.4] — 2026-05-03
+
+### Fixed
+- `RelayServer.serve()`: raised WebSocket `max_size` from 1MB to 50MB.
+  Image payloads (base64-encoded) were triggering WebSocket 1009 "message too big"
+  errors for any image over ~750KB, causing the connection to drop silently.
+
+---
+
 ## [0.4.3] — 2026-05-03
 
 ### Fixed
