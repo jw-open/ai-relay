@@ -4,6 +4,15 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.27] — 2026-05-24
+
+### Fixed
+- `claude_code.py`: re-release of the Claude Code synthetic API error handling
+  fix so deployments can distinguish it from the previously published `0.4.26`
+  package.
+
+---
+
 ## [0.4.26] — 2026-05-24
 
 ### Fixed
