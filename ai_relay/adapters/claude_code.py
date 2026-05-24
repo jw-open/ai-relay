@@ -188,6 +188,27 @@ class ClaudeStructuredRuntime(AgentRuntime):
 
     def _events_from_sdk_message(self, msg: dict[str, Any]) -> list[RelayEvent]:
         msg_type = msg.get("type")
+        if msg_type == "assistant" and msg.get("isApiErrorMessage"):
+            text = self._text_from_assistant_message(msg) or msg.get("error") or "Claude Code API error"
+            status = msg.get("apiErrorStatus")
+            error = str(msg.get("error") or "")
+            event_type = (
+                EventType.QUOTA_WARNING
+                if status == 429 or "rate_limit" in error.lower()
+                else EventType.ERROR
+            )
+            return [RelayEvent(
+                type=event_type,
+                session_id=self.session_id,
+                text=text,
+                metadata={
+                    "provider": "claude",
+                    "api_error_status": status,
+                    "api_error": msg.get("error"),
+                    "is_api_error_message": True,
+                },
+                raw=msg,
+            )]
         if msg_type == "assistant":
             events = [RelayEvent(
                 type=EventType.ASSISTANT_MESSAGE,
@@ -311,6 +332,14 @@ class ClaudeStructuredRuntime(AgentRuntime):
         if not isinstance(content, list):
             return []
         return [block for block in content if isinstance(block, dict)]
+
+    @classmethod
+    def _text_from_assistant_message(cls, msg: dict[str, Any]) -> str:
+        return "\n\n".join(
+            str(block.get("text") or "")
+            for block in cls._content_blocks(msg)
+            if block.get("type") == "text" and block.get("text")
+        ).strip()
 
 
 class ClaudeCodeAdapter(BaseAdapter):

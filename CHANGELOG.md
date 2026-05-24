@@ -4,6 +4,15 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.26] — 2026-05-24
+
+### Fixed
+- `claude_code.py`: Claude Code synthetic API error messages
+  (`isApiErrorMessage`, e.g. HTTP 429 rate limits) now emit `quota_warning` or
+  `error` relay events instead of normal `assistant_message` responses.
+
+---
+
 ## [0.4.24] — 2026-05-07
 
 ### Fixed
