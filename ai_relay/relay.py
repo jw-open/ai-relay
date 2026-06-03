@@ -339,11 +339,15 @@ class RelaySession:
             logger.debug("[%s] WS -> runtime: %r", self.session_id, msg)
             if self._runtime:
                 await self._runtime.handle_client_message(msg)
-                await self._send(ws, RelayEvent(
-                    type=EventType.INPUT_ACK,
-                    session_id=self.session_id,
-                    text=text or msg.get("type"),
-                ))
+                # Don't send input_ack for control/keepalive messages (ping, etc.)
+                if msg.get("type") not in ("ping", "pong", "interrupt", "set_model",
+                                            "set_permission_mode", "permission_response",
+                                            "control_request", "control_response"):
+                    await self._send(ws, RelayEvent(
+                        type=EventType.INPUT_ACK,
+                        session_id=self.session_id,
+                        text=text or msg.get("type"),
+                    ))
 
     @staticmethod
     async def _send(ws: WebSocketServerProtocol, event: RelayEvent) -> None:
