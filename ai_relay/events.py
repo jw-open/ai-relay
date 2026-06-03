@@ -35,6 +35,8 @@ class EventType(str, Enum):
     CONTEXT_WARNING = "context_warning"   # context window nearing limit
     CONTEXT_COMPACTED = "context_compacted"
     ERROR = "error"
+    # Artifacts
+    ARTIFACT = "artifact"          # structured output block (html/code/markdown/data)
     # Control
     INPUT_ACK = "input_ack"        # relay confirms input was sent to process
 
@@ -58,6 +60,9 @@ class RelayEvent:
     content: Optional[Any] = None
     raw: Optional[dict] = None
     status: Optional[str] = None
+    # Artifact-specific fields
+    title: Optional[str] = None
+    artifact_type: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps({k: v for k, v in asdict(self).items() if v is not None})

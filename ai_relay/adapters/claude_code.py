@@ -10,6 +10,7 @@ from typing import Any, Optional
 from ..events import EventType, RelayEvent
 from ..transports import StructuredProcessTransport
 from .base import AgentRuntime, BaseAdapter
+from ..artifacts import extract_artifacts
 
 
 class ClaudeStructuredRuntime(AgentRuntime):
@@ -270,10 +271,30 @@ class ClaudeStructuredRuntime(AgentRuntime):
                 )]
             return [RelayEvent(type=EventType.STATUS, session_id=self.session_id, raw=msg)]
         if msg_type == "result":
+            is_success = msg.get("subtype") == "success"
+            result_text = msg.get("result") or ", ".join(msg.get("errors") or [])
+            if is_success and "[ARTIFACT" in (result_text or ""):
+                clean_text, artifacts = extract_artifacts(result_text)
+                events: list[RelayEvent] = [RelayEvent(
+                    type=EventType.RESPONSE,
+                    session_id=self.session_id,
+                    text=clean_text,
+                    raw=msg,
+                )]
+                for a in artifacts:
+                    events.append(RelayEvent(
+                        type=EventType.ARTIFACT,
+                        session_id=self.session_id,
+                        text=a.content,
+                        title=a.title,
+                        artifact_type=a.artifact_type,
+                        metadata={"lang": a.lang} if a.lang else None,
+                    ))
+                return events
             return [RelayEvent(
-                type=EventType.RESPONSE if msg.get("subtype") == "success" else EventType.ERROR,
+                type=EventType.RESPONSE if is_success else EventType.ERROR,
                 session_id=self.session_id,
-                text=msg.get("result") or ", ".join(msg.get("errors") or []),
+                text=result_text,
                 raw=msg,
             )]
         if msg_type == "tool_progress":
