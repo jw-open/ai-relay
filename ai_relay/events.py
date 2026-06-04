@@ -39,6 +39,7 @@ class EventType(str, Enum):
     ARTIFACT = "artifact"          # structured output block (html/code/markdown/data)
     # Control
     INPUT_ACK = "input_ack"        # relay confirms input was sent to process
+    SESSION_ATTACH = "session_attach"  # carries claude_session_id for client-side persistence
 
 
 @dataclass

@@ -177,6 +177,12 @@ class PerTurnRuntime(AgentRuntime):
                                 "[per-turn:%s] agent session_id=%s",
                                 self.session_id, sid,
                             )
+                            # Emit to client so it can persist the ID for resume
+                            await self._events.put(RelayEvent(
+                                type=EventType.SESSION_ATTACH,
+                                session_id=self.session_id,
+                                metadata={"claude_session_id": sid},
+                            ))
                 await self._events.put(event)
         except asyncio.CancelledError:
             pass
