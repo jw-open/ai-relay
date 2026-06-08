@@ -116,8 +116,10 @@ class RelaySession:
         extra_args: Optional[list[str]] = None,
         config: Optional[dict[str, Any]] = None,
         workspace_root: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ):
         self.session_id = session_id
+        self.workspace_id = workspace_id or session_id
         self.tool = tool
         self.folder = os.path.abspath(folder)
         self.model = model
@@ -133,7 +135,7 @@ class RelaySession:
     async def start(self, ws: WebSocketServerProtocol) -> None:
         """Spawn the subprocess and relay I/O until the process exits or WS closes."""
         cmd = self._adapter.build_command(self.folder, self.model, self.extra_args)
-        logger.info("[%s] Starting: %s in %s", self.session_id, cmd, self.folder)
+        logger.info("[%s][ws=%s] Starting: %s in %s", self.session_id, self.workspace_id, cmd, self.folder)
 
         env = self._build_env(cmd[0]) if cmd else self._build_env("")
 
@@ -158,7 +160,7 @@ class RelaySession:
         await self._send(ws, RelayEvent(
             type=EventType.SESSION_START,
             session_id=self.session_id,
-            metadata={"tool": self.tool, "folder": self.folder, "model": self.model, "cmd": cmd},
+            metadata={"tool": self.tool, "folder": self.folder, "model": self.model, "cmd": cmd, "workspace_id": self.workspace_id},
         ))
 
         try:
@@ -416,6 +418,7 @@ class RelayServer:
             extra_args=config.get("extra_args"),
             config=config,
             workspace_root=self.workspace_root,
+            workspace_id=config.get("workspace_id"),
         )
         try:
             await session.start(ws)
