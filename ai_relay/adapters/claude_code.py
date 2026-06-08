@@ -378,7 +378,11 @@ class ClaudeCodeAdapter(BaseAdapter):
             "--output-format",
             "stream-json",
             "--verbose",
-            "--replay-user-messages",
+            # --replay-user-messages removed: incompatible with per-turn --resume.
+            # With --resume, Claude loads the full conversation history from its own
+            # session store. Replaying user messages via stdin is redundant and causes
+            # Turn 2+ to hang (Claude waits for all prior turns to be replayed, but
+            # the per-turn relay only sends the current turn's message).
             "--permission-prompt-tool",
             "stdio",
         ]
