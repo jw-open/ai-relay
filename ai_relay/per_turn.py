@@ -184,6 +184,13 @@ class PerTurnRuntime(AgentRuntime):
                                 metadata={"claude_session_id": sid},
                             ))
                 await self._events.put(event)
+                # Auto-compact when context window is full
+                if event.type == EventType.CONTEXT_WARNING:
+                    try:
+                        await runtime.handle_client_message({"text": "/compact"})
+                        logger.info("[per-turn:%s] auto-sent /compact on context_warning", self.session_id)
+                    except Exception as _ce:
+                        logger.warning("[per-turn:%s] auto-compact failed: %s", self.session_id, _ce)
         except asyncio.CancelledError:
             pass
         except Exception as exc:
