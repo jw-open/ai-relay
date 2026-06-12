@@ -193,9 +193,12 @@ class ClaudeStructuredRuntime(AgentRuntime):
             text = self._text_from_assistant_message(msg) or msg.get("error") or "Claude Code API error"
             status = msg.get("apiErrorStatus")
             error = str(msg.get("error") or "")
+            _err_lower = (text + " " + error).lower()
             event_type = (
                 EventType.QUOTA_WARNING
-                if status == 429 or "rate_limit" in error.lower()
+                if status == 429 or "rate_limit" in _err_lower
+                else EventType.CONTEXT_WARNING
+                if "prompt is too long" in _err_lower or "prompt_too_long" in _err_lower or "context_length_exceeded" in _err_lower
                 else EventType.ERROR
             )
             return [RelayEvent(

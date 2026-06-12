@@ -323,6 +323,14 @@ class RelaySession:
                 continue
             logger.debug("[%s] sending event: %s", self.session_id, event.to_json()[:200])
             await self._send(ws, event)
+            # Auto-compact when context window is full (context_warning covers both
+            # the "nearing limit" warning and reclassified "Prompt is too long" errors)
+            if event.type == EventType.CONTEXT_WARNING and self._runtime:
+                try:
+                    await self._runtime.handle_client_message({"text": "/compact"})
+                    logger.info("[%s] auto-sent /compact on context_warning", self.session_id)
+                except Exception as _e:
+                    logger.warning("[%s] auto-compact failed: %s", self.session_id, _e)
 
     async def _read_ws(self, ws: WebSocketServerProtocol) -> None:
         """Forward WebSocket messages to the subprocess stdin."""
