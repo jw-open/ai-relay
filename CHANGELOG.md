@@ -4,6 +4,22 @@ All notable changes to ai-relay are documented here.
 
 ---
 
+## [0.4.39] — 2026-06-14
+
+### Added
+- `per_turn.py`: `/model` switches now post a "Model switched to **X**" message to
+  the chat (with `model_switch` metadata) so the web UI can show the active model
+  and reflect the switch in history.
+- `per_turn.py`: `set_model` validates the requested model against
+  `^[A-Za-z0-9][A-Za-z0-9._-]*$`, rejecting flag-like / whitespace tokens.
+
+### Changed
+- `per_turn.py`: `/update` uses `claude install` (sudo-free native installer to
+  `$HOME/.local`) instead of `claude update`, which fails on root-owned npm global
+  installs. Resume id and model override are explicitly preserved across the update.
+
+---
+
 ## [0.4.27] — 2026-05-24
 
 ### Fixed

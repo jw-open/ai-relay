@@ -21,12 +21,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Optional, Type
 
 from .adapters.base import AgentRuntime
 from .events import EventType, RelayEvent
 
 logger = logging.getLogger(__name__)
+
+# Accepted model identifiers for set_model: full ids (claude-opus-4-8, …) and
+# short aliases (sonnet, opus, haiku). Must start alphanumeric — this blocks
+# leading-dash / whitespace tokens that could look like CLI flags.
+_VALID_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class PerTurnRuntime(AgentRuntime):
@@ -98,8 +104,22 @@ class PerTurnRuntime(AgentRuntime):
         # set_model is also persisted so the NEXT subprocess uses the new model.
         if msg_type in self.CONTROL_TYPES:
             if msg_type == "set_model":
-                new_model = msg.get("model") or ""
-                if new_model:
+                new_model = (msg.get("model") or "").strip()
+                if new_model and not _VALID_MODEL_RE.match(new_model):
+                    # Reject malformed values defensively (no leading dash, no
+                    # whitespace) so a crafted set_model can't smuggle a flag-like
+                    # token into the launch command. Resume/turn flow is untouched.
+                    logger.warning(
+                        "[per-turn:%s] rejected invalid model override: %r",
+                        self.session_id, new_model,
+                    )
+                    await self._events.put(RelayEvent(
+                        type=EventType.RESPONSE,
+                        session_id=self.session_id,
+                        text=f"Ignored invalid model name `{new_model}`.",
+                        metadata={"model_switch_rejected": new_model, "source": "set_model"},
+                    ))
+                elif new_model:
                     self._override_model = new_model
                     logger.info(
                         "[per-turn:%s] model override → %s (takes effect next turn)",
@@ -253,7 +273,15 @@ class PerTurnRuntime(AgentRuntime):
         for non-root users even when the baseline is a root-owned npm global install
         (where ``claude update`` fails with "npm global folder isn't writable").
         The resulting ``$HOME/.local/bin/claude`` is preferred via PATH on the next turn.
+
+        Resume continuity: this only restarts the inner Claude subprocess, never the
+        relay. ``self._agent_session_id`` (and ``self._override_model``) are kept, so the
+        next turn launches with ``--resume <id>`` and the existing context is preserved.
         """
+        logger.info(
+            "[per-turn:%s] /update starting; preserving resume id=%s model=%s",
+            self.session_id, self._agent_session_id, self._override_model,
+        )
         await self._events.put(RelayEvent(
             type=EventType.STATUS,
             session_id=self.session_id,
