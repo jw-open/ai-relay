@@ -105,6 +105,12 @@ class PerTurnRuntime(AgentRuntime):
                         "[per-turn:%s] model override → %s (takes effect next turn)",
                         self.session_id, new_model,
                     )
+                    await self._events.put(RelayEvent(
+                        type=EventType.RESPONSE,
+                        session_id=self.session_id,
+                        text=f"Model switched to **{new_model}**. Takes effect on your next message.",
+                        metadata={"model_switch": new_model, "source": "set_model"},
+                    ))
             if self._current:
                 await self._current.handle_client_message(msg)
             return
