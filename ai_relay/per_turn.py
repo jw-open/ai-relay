@@ -239,7 +239,15 @@ class PerTurnRuntime(AgentRuntime):
         return result
 
     async def _run_update(self) -> None:
-        """Handle /update: stop subprocess, run `claude update`, report result."""
+        """Handle /update: stop subprocess, update Claude Code, report result.
+
+        Uses ``claude install`` (the native installer) rather than ``claude update``.
+        ``claude install`` is the sudo-free path: it installs the latest version to
+        ``$HOME/.local`` regardless of how Claude was originally installed. This works
+        for non-root users even when the baseline is a root-owned npm global install
+        (where ``claude update`` fails with "npm global folder isn't writable").
+        The resulting ``$HOME/.local/bin/claude`` is preferred via PATH on the next turn.
+        """
         await self._events.put(RelayEvent(
             type=EventType.STATUS,
             session_id=self.session_id,
@@ -265,30 +273,34 @@ class PerTurnRuntime(AgentRuntime):
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "claude", "update",
+                "claude", "install",
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=self._env,
             )
             try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=180)
                 output = (stdout or b"").decode("utf-8", errors="replace").strip()
                 rc = proc.returncode or 0
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-                output = "Update timed out after 120 seconds."
+                output = "Update timed out after 180 seconds."
                 rc = -1
         except FileNotFoundError:
             output = "`claude` binary not found in PATH."
             rc = -1
 
         if rc == 0:
-            text = f"Claude Code updated successfully.\n\n{output}\n\nSend any message to start a session with the new version."
+            text = (
+                f"Claude Code updated to the latest version.\n\n{output}\n\n"
+                "Send any message to start a session with the new version."
+            )
         else:
             text = f"Update failed (exit {rc}).\n\n{output}"
 
-        logger.info("[per-turn:%s] claude update rc=%s", self.session_id, rc)
+        logger.info("[per-turn:%s] claude install rc=%s", self.session_id, rc)
         await self._events.put(RelayEvent(
             type=EventType.RESPONSE,
             session_id=self.session_id,

@@ -352,7 +352,8 @@ class RelaySession:
                 # Don't send input_ack for control/keepalive messages (ping, etc.)
                 if msg.get("type") not in ("ping", "pong", "interrupt", "set_model",
                                             "set_permission_mode", "permission_response",
-                                            "control_request", "control_response"):
+                                            "control_request", "control_response",
+                                            "claude_update"):
                     await self._send(ws, RelayEvent(
                         type=EventType.INPUT_ACK,
                         session_id=self.session_id,
