@@ -101,6 +101,15 @@ def ensure_claude_token(env: dict[str, str]) -> None:
     oauth = creds.get("claudeAiOauth", {})
     _prefer_oauth(env, oauth)
     refresh_token = oauth.get("refreshToken")
+    if not refresh_token:
+        # Claude Code rewrites .credentials.json after sessions and clears refreshToken.
+        # Fall back to the sidecar written by OhWise Lab at auth time.
+        sidecar = os.path.join(os.path.dirname(path), ".ohwise_refresh")
+        try:
+            with open(sidecar) as sf:
+                refresh_token = sf.read().strip()
+        except (FileNotFoundError, OSError):
+            pass
     if not refresh_token or not _needs_refresh(creds):
         return
 
