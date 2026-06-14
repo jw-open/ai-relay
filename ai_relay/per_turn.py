@@ -32,8 +32,7 @@ logger = logging.getLogger(__name__)
 class PerTurnRuntime(AgentRuntime):
     """Wraps any AgentRuntime subclass, restarting per user turn."""
 
-    #: Message types that are forwarded to the current subprocess directly
-    #: (no restart, no queueing).
+    #: Message types forwarded directly to the current subprocess (no restart).
     CONTROL_TYPES = frozenset(
         {"interrupt", "permission_response", "set_model", "set_permission_mode"}
     )
@@ -69,6 +68,9 @@ class PerTurnRuntime(AgentRuntime):
                 "[per-turn:%s] seeding resume from handshake claude_session_id=%s",
                 session_id, self._agent_session_id,
             )
+        # Model override: persisted across turns when user selects a new model.
+        # Applied by replacing/inserting --model in the command on every _run_turn().
+        self._override_model: Optional[str] = None
         self._turn_lock = asyncio.Lock()
         self._stopped = False
 
@@ -87,8 +89,22 @@ class PerTurnRuntime(AgentRuntime):
 
         msg_type = msg.get("type", "")
 
-        # Control / permission messages: forward to running subprocess only.
+        # /update slash command: stop subprocess, run `claude update`, report.
+        if msg_type == "claude_update":
+            asyncio.create_task(self._run_update())
+            return
+
+        # Control / permission messages: forward to running subprocess.
+        # set_model is also persisted so the NEXT subprocess uses the new model.
         if msg_type in self.CONTROL_TYPES:
+            if msg_type == "set_model":
+                new_model = msg.get("model") or ""
+                if new_model:
+                    self._override_model = new_model
+                    logger.info(
+                        "[per-turn:%s] model override → %s (takes effect next turn)",
+                        self.session_id, new_model,
+                    )
             if self._current:
                 await self._current.handle_client_message(msg)
             return
@@ -133,6 +149,9 @@ class PerTurnRuntime(AgentRuntime):
                 pass
 
         cmd = list(self._base_cmd)
+        # Apply model override: replaces --model in the base command or appends it.
+        if self._override_model:
+            cmd = self._apply_model_override(cmd, self._override_model)
         if self._agent_session_id:
             cmd = cmd + [self._resume_flag, self._agent_session_id]
 
@@ -200,6 +219,82 @@ class PerTurnRuntime(AgentRuntime):
                 session_id=self.session_id,
                 text=f"Relay error: {exc}",
             ))
+
+    @staticmethod
+    def _apply_model_override(cmd: list[str], model: str) -> list[str]:
+        """Replace --model <value> in cmd list, or append if not present."""
+        result: list[str] = []
+        i = 0
+        replaced = False
+        while i < len(cmd):
+            if cmd[i] == "--model" and i + 1 < len(cmd):
+                result += ["--model", model]
+                i += 2
+                replaced = True
+            else:
+                result.append(cmd[i])
+                i += 1
+        if not replaced:
+            result += ["--model", model]
+        return result
+
+    async def _run_update(self) -> None:
+        """Handle /update: stop subprocess, run `claude update`, report result."""
+        await self._events.put(RelayEvent(
+            type=EventType.STATUS,
+            session_id=self.session_id,
+            status="updating",
+            text="Updating Claude Code…",
+        ))
+
+        # Stop any in-flight subprocess gracefully before running the updater.
+        async with self._turn_lock:
+            if self._reader_task and not self._reader_task.done():
+                self._reader_task.cancel()
+                try:
+                    await self._reader_task
+                except asyncio.CancelledError:
+                    pass
+                self._reader_task = None
+            if self._current:
+                try:
+                    await self._current.stop()
+                except Exception:
+                    pass
+                self._current = None
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "update",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+                output = (stdout or b"").decode("utf-8", errors="replace").strip()
+                rc = proc.returncode or 0
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                output = "Update timed out after 120 seconds."
+                rc = -1
+        except FileNotFoundError:
+            output = "`claude` binary not found in PATH."
+            rc = -1
+
+        if rc == 0:
+            text = f"Claude Code updated successfully.\n\n{output}\n\nSend any message to start a session with the new version."
+        else:
+            text = f"Update failed (exit {rc}).\n\n{output}"
+
+        logger.info("[per-turn:%s] claude update rc=%s", self.session_id, rc)
+        await self._events.put(RelayEvent(
+            type=EventType.RESPONSE,
+            session_id=self.session_id,
+            text=text,
+            metadata={"update_exit_code": rc, "source": "claude_update"},
+        ))
 
     @staticmethod
     def _extract_prompt(msg: dict[str, Any]) -> Optional[str]:
