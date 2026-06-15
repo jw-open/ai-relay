@@ -7,9 +7,10 @@ This document explains how ai-relay works internally: the data flow, runtime mod
 ## Table of contents
 
 1. [Overview](#overview)
-2. [Component map](#component-map)
-3. [Data flow](#data-flow)
-4. [Runtime models: per-turn vs persistent](#runtime-models-per-turn-vs-persistent)
+2. [Session multiplexing model](#session-multiplexing-model)
+3. [Component map](#component-map)
+4. [Data flow](#data-flow)
+5. [Runtime models: per-turn vs persistent](#runtime-models-per-turn-vs-persistent)
 5. [Event system](#event-system)
 6. [Client → relay message protocol](#client--relay-message-protocol)
 7. [Handshake](#handshake)
@@ -44,6 +45,57 @@ Browser / frontend
         ▼
    LLM API (Anthropic / OpenAI / Google / Snowflake)
 ```
+
+---
+
+## Session multiplexing model
+
+`ai-relay serve` is **one long-lived server process** that handles **many concurrent WebSocket connections**. Each connection is an independent session — there is **never more than one `ai-relay serve` process per environment**.
+
+- **One process** (`ai-relay serve`) per host or container — *not* one process per session.
+- **One WebSocket connection → one `RelaySession`**, keyed by the handshake `session_id`, with its own `folder`, `model`, adapter, event stream, and (for per-turn tools like Claude Code) its own **transient agent subprocess spawned per turn**.
+- **Full isolation at the connection level** — separate event streams, status, and subprocesses; no state is shared across connections.
+- **Closing a connection tears down only that session** (and kills its in-flight subprocess); other sessions are unaffected.
+
+So a client running N concurrent sessions sees: **1 `ai-relay serve` process, N WebSocket connections, up to N transient agent subprocesses** (one per session currently mid-turn).
+
+### Recommended architecture (production / enterprise-grade SaaS)
+
+**This is the recommended way to run ai-relay in a multi-tenant, enterprise-grade SaaS product.** It gives you strong per-tenant isolation, per-session independence, and turns that survive browser refreshes — using one server-side orchestrator in front of per-tenant relay containers:
+
+```
+        Browsers (N tabs per session)
+              │  WebSocket per (session × tab)
+              ▼
+     ┌──────────────────────────┐
+     │   Orchestrator / hub      │   ← your service (e.g. OhWise lab-ctrl)
+     │  • 1 hub per session_id   │     - authn/authz, RBAC
+     │  • fans out to N tabs     │     - persists history + state (DB)
+     │  • holds the session WS   │     - keeps turns alive across refresh
+     └─────────┬────────────────┘
+               │  1 WebSocket per session_id
+               ▼
+   ┌───────────────────────────────┐
+   │  Per-tenant isolated runtime   │   ← VM / pod / container / serverless / host (1 per tenant)
+   │   ai-relay serve  (ONE proc)   │     - multiplexes that tenant's sessions
+   │     ├─ RelaySession (sess A) → claude/codex/… subprocess (per turn)
+   │     └─ RelaySession (sess B) → …
+   │   isolated HOME / workspace    │
+   └───────────────────────────────┘
+```
+
+**Principles:**
+- **Isolation boundary = one isolated compute boundary per tenant/user.** Use whatever isolation primitive fits your security/scale needs — e.g. a VM, pod, container, serverless/Lambda sandbox, dedicated server, or on-prem host (non-exhaustive). Each runs **one** `ai-relay serve` that multiplexes that tenant's sessions. Never expose ai-relay directly to the browser; **never share one runtime/process across tenants.**
+- **A server-side orchestrator owns the session lifecycle** — it holds one WebSocket per `session_id` to the relay, fans out to the browser tabs, enforces auth/RBAC, and persists conversation history + state in a database. ai-relay stays a stateless streaming engine; durability lives in your orchestrator.
+- **Turn durability:** keep the relay WebSocket open in the orchestrator so an in-progress turn survives a browser refresh/disconnect; reconnecting clients re-attach to the live hub.
+- **Security:** per-tenant filesystem isolation, least-privilege hardening appropriate to your runtime (e.g. dropped capabilities / `no-new-privileges` for containers, a locked-down image for VMs), and internal-only networking (no public ports). The runtime can be any isolated compute boundary — VM, pod, container, serverless/Lambda sandbox, dedicated server, or on-prem host — pick per your isolation and scale requirements.
+
+**Operational rules:**
+- **Run one `ai-relay serve` per isolation boundary** (per user / per container / per machine) and **open one WebSocket connection per logical session**. Do **not** spawn a separate `ai-relay serve` per session — the server already multiplexes.
+- **Use `serve` (server) mode** for anything multi-session or long-running; reserve one-shot `ai-relay` for local single-session dev.
+- **Assign each session a stable `session_id`** and persist it on the client/orchestrator side. ai-relay does not persist session state across disconnects (see [Reconnect and session resume](#reconnect-and-session-resume)) — pass the saved `session_id` back in the handshake to resume (Claude `--resume`).
+- **To keep an in-progress turn alive across a browser refresh/disconnect, hold the WebSocket open in a server-side orchestrator/hub** rather than tying it to the browser — closing the connection ends that session's current turn. Fan out to multiple browser tabs from that one per-session connection.
+- **Give each session its own isolated `HOME`/workspace** so agent subprocesses and their on-disk conversation stores never collide.
 
 ---
 

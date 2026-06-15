@@ -45,6 +45,16 @@ CMD ["ai-relay", "serve", "--port", "9000"]
 
 Each incoming WebSocket connection spawns an independent agent session. Multiple clients can connect simultaneously.
 
+### Recommended architecture (enterprise-grade SaaS)
+
+For a multi-tenant, production SaaS, the **recommended design** is:
+
+- **One isolated compute boundary per tenant/user** (the isolation boundary) — use whatever fits your needs: a VM, pod, container, serverless/Lambda sandbox, dedicated server, or on-prem host. Each runs **one** `ai-relay serve` that **multiplexes all of that tenant's sessions** — one WebSocket connection per `session_id`. Never share one runtime across tenants, and do not start one process per session.
+- **A server-side orchestrator/hub in front** (never expose ai-relay to the browser): it holds one WebSocket per session to the relay, fans out to N browser tabs, enforces auth/RBAC, persists conversation history + state in a database, and **keeps the connection open so in-progress turns survive a browser refresh**.
+- **Per-tenant filesystem isolation + dropped capabilities + internal-only networking.**
+
+ai-relay is the stateless streaming engine; durability and multi-tenancy live in your orchestrator. Full reference architecture and rationale: **[docs/architecture.md → Session multiplexing model / Recommended architecture](docs/architecture.md#session-multiplexing-model)**.
+
 ## Event types
 
 | Type | Description |
