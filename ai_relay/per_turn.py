@@ -79,6 +79,11 @@ class PerTurnRuntime(AgentRuntime):
         self._override_model: Optional[str] = None
         self._turn_lock = asyncio.Lock()
         self._stopped = False
+        # Cumulative cost/token tracking — populated from result messages each turn.
+        self._total_cost_usd: float = 0.0
+        self._total_input_tokens: int = 0
+        self._total_output_tokens: int = 0
+        self._turn_count: int = 0
 
     # ── AgentRuntime interface ────────────────────────────────────────────────
 
@@ -136,7 +141,16 @@ class PerTurnRuntime(AgentRuntime):
             return
 
         # User prompt: check there is actual content.
-        if not self._extract_prompt(msg):
+        prompt = self._extract_prompt(msg)
+        if not prompt:
+            return
+
+        # Relay-handled slash commands — respond locally, never forward to subprocess.
+        if prompt.strip() == "/cost":
+            await self._emit_cost_summary()
+            return
+        if prompt.strip() == "/status":
+            await self._emit_status_summary()
             return
 
         async with self._turn_lock:
@@ -229,6 +243,13 @@ class PerTurnRuntime(AgentRuntime):
                                 metadata={"claude_session_id": sid},
                             ))
                 await self._events.put(event)
+                # Accumulate cost/token totals from each turn's result message.
+                if event.raw and event.raw.get("type") == "result" and event.raw.get("subtype") == "success":
+                    self._total_cost_usd += float(event.raw.get("total_cost_usd") or 0.0)
+                    usage = event.raw.get("usage") or {}
+                    self._total_input_tokens += int(usage.get("input_tokens", 0))
+                    self._total_output_tokens += int(usage.get("output_tokens", 0))
+                    self._turn_count += 1
                 # Auto-compact when context window is full
                 if event.type == EventType.CONTEXT_WARNING:
                     try:
@@ -245,6 +266,35 @@ class PerTurnRuntime(AgentRuntime):
                 session_id=self.session_id,
                 text=f"Relay error: {exc}",
             ))
+
+    async def _emit_cost_summary(self) -> None:
+        lines = [
+            f"**Session cost:** ${self._total_cost_usd:.4f}",
+            f"**Input tokens:** {self._total_input_tokens:,}",
+            f"**Output tokens:** {self._total_output_tokens:,}",
+            f"**Turns:** {self._turn_count}",
+        ]
+        await self._events.put(RelayEvent(
+            type=EventType.RESPONSE,
+            session_id=self.session_id,
+            text="\n".join(lines),
+            metadata={"source": "cost_summary"},
+        ))
+
+    async def _emit_status_summary(self) -> None:
+        model = self._override_model or "default"
+        lines = [
+            f"**Model:** {model}",
+            f"**Session:** {self._agent_session_id or 'new'}",
+            f"**Turns:** {self._turn_count}",
+            f"**Cost so far:** ${self._total_cost_usd:.4f}",
+        ]
+        await self._events.put(RelayEvent(
+            type=EventType.RESPONSE,
+            session_id=self.session_id,
+            text="\n".join(lines),
+            metadata={"source": "status_summary"},
+        ))
 
     @staticmethod
     def _apply_model_override(cmd: list[str], model: str) -> list[str]:
