@@ -84,6 +84,11 @@ class PerTurnRuntime(AgentRuntime):
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
         self._turn_count: int = 0
+        # Real model + context window, captured from the subprocess `system/init`
+        # and `result` events. The override (if set) wins for display since it's
+        # what the NEXT turn will use; otherwise we report what's actually running.
+        self._current_model: Optional[str] = None
+        self._last_context_tokens: int = 0
 
     # ── AgentRuntime interface ────────────────────────────────────────────────
 
@@ -229,6 +234,11 @@ class PerTurnRuntime(AgentRuntime):
                 if event.raw:
                     raw = event.raw
                     if raw.get("type") == "system" and raw.get("subtype") == "init":
+                        # The init event reports the model the subprocess actually
+                        # launched with — capture it so /status shows the real value.
+                        init_model = raw.get("model")
+                        if init_model:
+                            self._current_model = str(init_model)
                         sid = raw.get("session_id")
                         if sid:
                             self._agent_session_id = sid
@@ -250,6 +260,13 @@ class PerTurnRuntime(AgentRuntime):
                     self._total_input_tokens += int(usage.get("input_tokens", 0))
                     self._total_output_tokens += int(usage.get("output_tokens", 0))
                     self._turn_count += 1
+                    # Live context window = everything Claude re-read this turn
+                    # (input + cache) — approximates what /status shows natively.
+                    self._last_context_tokens = (
+                        int(usage.get("input_tokens", 0))
+                        + int(usage.get("cache_read_input_tokens", 0))
+                        + int(usage.get("cache_creation_input_tokens", 0))
+                    )
                 # Auto-compact when context window is full
                 if event.type == EventType.CONTEXT_WARNING:
                     try:
@@ -282,11 +299,15 @@ class PerTurnRuntime(AgentRuntime):
         ))
 
     async def _emit_status_summary(self) -> None:
-        model = self._override_model or "default"
+        # Prefer the override (what the next turn will use); fall back to the model
+        # the running subprocess actually reported via its init event.
+        model = self._override_model or self._current_model or "default"
+        pending = " (applies next turn)" if self._override_model and self._override_model != self._current_model else ""
         lines = [
-            f"**Model:** {model}",
-            f"**Session:** {self._agent_session_id or 'new'}",
+            f"**Model:** {model}{pending}",
+            f"**Session:** {self._agent_session_id or 'new (no turn yet)'}",
             f"**Turns:** {self._turn_count}",
+            f"**Context (last turn):** {self._last_context_tokens:,} tokens",
             f"**Cost so far:** ${self._total_cost_usd:.4f}",
         ]
         await self._events.put(RelayEvent(
