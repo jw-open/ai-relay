@@ -113,6 +113,35 @@ Interrupt the active structured turn:
 {"type": "interrupt"}
 ```
 
+### Relay-handled slash commands (Claude per-turn runtime)
+
+In `--print` / stream-json mode the CLI has no interactive TUI, so the relay
+intercepts a few commands and answers them itself (they are never forwarded to
+the subprocess):
+
+| Command | Effect |
+|---------|--------|
+| `/status` | Current model, conversation id, turns, last-turn context tokens, cumulative cost |
+| `/cost` | Cumulative cost + input/output tokens + turn count |
+| `/new` (alias `/clear`) | Drop the resume pointer — the **next** turn starts a fresh conversation. Use this to recover a bloated/stuck session. |
+
+### Auto-reset safeguards (resume durability)
+
+Claude Code resumes a conversation by reloading its on-disk transcript each turn.
+A very large transcript makes `--resume` slow or hang. The relay guards against
+this automatically:
+
+- **Transcript-size rotation** — before resuming, if the transcript exceeds
+  `AI_RELAY_TRANSCRIPT_ROTATE_BYTES` (default 5 MB) the relay starts a fresh
+  conversation and emits a `response` (`metadata.source = "auto_rotate"`).
+- **Resume-hang watchdog** — if a resumed turn emits `system/init` then stalls for
+  `AI_RELAY_RESUME_HANG_TIMEOUT` seconds (default 90) with no result, the relay
+  kills the subprocess and retries once **without** `--resume`
+  (`metadata.source = "resume_hang_retry"`).
+
+Earlier conversation history shown in your own UI is unaffected — rotation only
+resets the CLI's resume context, not your application's stored history.
+
 Codex uses `codex app-server --listen stdio://` and keeps a persistent thread behind the WebSocket session:
 
 ```json
