@@ -35,13 +35,18 @@ logger = logging.getLogger(__name__)
 # leading-dash / whitespace tokens that could look like CLI flags.
 _VALID_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-# Auto-reset safeguards against a bloated/hung resume conversation:
-#  - Rotate (start a fresh conversation) when the on-disk transcript exceeds this
-#    size — a huge transcript makes `--resume` slow or hang on load.
-#  - Watchdog: if a resumed turn emits `system/init` then stalls (no further event)
-#    for this long with no result, kill it and retry once WITHOUT --resume.
-_TRANSCRIPT_ROTATE_BYTES = int(os.environ.get("AI_RELAY_TRANSCRIPT_ROTATE_BYTES", 5 * 1024 * 1024))
-_RESUME_HANG_TIMEOUT = float(os.environ.get("AI_RELAY_RESUME_HANG_TIMEOUT", 90))
+# Auto-reset safeguards against a HUNG resume conversation.
+#  - Watchdog (primary): if a resumed turn emits `system/init` then produces NOTHING
+#    else (no reasoning/tool/text/result) within the timeout, the resume is hung —
+#    kill it and retry once WITHOUT --resume. This fires ONLY on a true hang, never
+#    on a long-but-working turn (those keep emitting events).
+#  - Proactive size rotation is DISABLED by default (0). It was too blunt: it dropped
+#    a working session's context purely on transcript size (~5MB is normal for an
+#    active session), causing surprise "restart without continuation". The watchdog
+#    already recovers genuinely-stuck (e.g. 17MB) resumes without wiping live work.
+#    Set AI_RELAY_TRANSCRIPT_ROTATE_BYTES > 0 to re-enable a (high) size cap.
+_TRANSCRIPT_ROTATE_BYTES = int(os.environ.get("AI_RELAY_TRANSCRIPT_ROTATE_BYTES", 0))
+_RESUME_HANG_TIMEOUT = float(os.environ.get("AI_RELAY_RESUME_HANG_TIMEOUT", 120))
 
 
 class PerTurnRuntime(AgentRuntime):
@@ -98,9 +103,10 @@ class PerTurnRuntime(AgentRuntime):
         # what the NEXT turn will use; otherwise we report what's actually running.
         self._current_model: Optional[str] = None
         self._last_context_tokens: int = 0
-        # Auto-reset bookkeeping (transcript rotation + resume-hang watchdog).
+        # Auto-reset bookkeeping (resume-hang watchdog).
         self._last_event_at: float = 0.0
         self._turn_got_result: bool = False
+        self._turn_progress: int = 0  # non-init events seen this turn
         self._watchdog_task: Optional[asyncio.Task] = None
 
     # ── AgentRuntime interface ────────────────────────────────────────────────
@@ -220,9 +226,9 @@ class PerTurnRuntime(AgentRuntime):
             except Exception:
                 pass
 
-        # Auto-rotation: if the on-disk transcript we'd resume is too large, start a
-        # FRESH conversation instead — a huge transcript makes --resume slow/hang.
-        if self._agent_session_id and not from_watchdog:
+        # Optional proactive rotation (DISABLED by default; _TRANSCRIPT_ROTATE_BYTES=0).
+        # Only when explicitly enabled to a high cap — never wipe a working session by size.
+        if _TRANSCRIPT_ROTATE_BYTES > 0 and self._agent_session_id and not from_watchdog:
             size = self._transcript_size(self._agent_session_id)
             if size is not None and size > _TRANSCRIPT_ROTATE_BYTES:
                 logger.warning(
@@ -268,6 +274,7 @@ class PerTurnRuntime(AgentRuntime):
 
         # Reset per-turn watchdog state.
         self._turn_got_result = False
+        self._turn_progress = 0  # count of non-init events; 0 after timeout ⇒ hung resume
         self._last_event_at = asyncio.get_event_loop().time()
         self._reader_task = asyncio.create_task(self._pump_turn(self._current))
 
@@ -288,6 +295,12 @@ class PerTurnRuntime(AgentRuntime):
                     logger.debug("[per-turn:%s] turn EOF", self.session_id)
                     self._turn_got_result = True
                     break
+                # Count real model output (anything that's not the system/init line) as
+                # progress — a hung resume emits ONLY init, so progress stays 0.
+                _is_init = bool(event.raw and event.raw.get("type") == "system"
+                                and event.raw.get("subtype") == "init")
+                if not _is_init:
+                    self._turn_progress += 1
                 # Capture Claude's internal session_id for --resume on next turn.
                 if event.raw:
                     raw = event.raw
@@ -366,20 +379,24 @@ class PerTurnRuntime(AgentRuntime):
             return None
 
     async def _resume_watchdog(self, msg: dict[str, Any], runtime: AgentRuntime) -> None:
-        """If a resumed turn stalls (no events for _RESUME_HANG_TIMEOUT after start)
-        without producing a result, kill it and retry once WITHOUT --resume."""
+        """Detect a HUNG resume and retry once without --resume.
+
+        Fires ONLY when a resumed turn emitted `system/init` and then produced NOTHING
+        else (no reasoning/tool/text/result) within the timeout — the signature of a
+        resume that's stuck loading. A long-but-working turn keeps emitting events
+        (``_turn_progress`` > 0), so it is never killed. This avoids the earlier bug
+        where size-based rotation / stall timing wiped a live session's context."""
         try:
             await asyncio.sleep(_RESUME_HANG_TIMEOUT)
             if self._stopped or self._turn_got_result:
                 return
             if runtime is not self._current:
                 return  # a newer turn already superseded this one
-            idle = asyncio.get_event_loop().time() - self._last_event_at
-            if idle < _RESUME_HANG_TIMEOUT:
-                return  # still producing output → genuinely long turn, leave it
+            if self._turn_progress > 0:
+                return  # produced real output → working (maybe slow), never a hang
             logger.warning(
-                "[per-turn:%s] resumed turn stalled %.0fs with no result — retrying fresh",
-                self.session_id, idle,
+                "[per-turn:%s] resumed turn produced only init (no output) in %.0fs — hung resume, retrying fresh",
+                self.session_id, _RESUME_HANG_TIMEOUT,
             )
             await self._events.put(RelayEvent(
                 type=EventType.RESPONSE,
