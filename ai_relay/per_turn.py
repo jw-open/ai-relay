@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from typing import Any, Optional, Type
 
@@ -33,6 +34,14 @@ logger = logging.getLogger(__name__)
 # short aliases (sonnet, opus, haiku). Must start alphanumeric — this blocks
 # leading-dash / whitespace tokens that could look like CLI flags.
 _VALID_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Auto-reset safeguards against a bloated/hung resume conversation:
+#  - Rotate (start a fresh conversation) when the on-disk transcript exceeds this
+#    size — a huge transcript makes `--resume` slow or hang on load.
+#  - Watchdog: if a resumed turn emits `system/init` then stalls (no further event)
+#    for this long with no result, kill it and retry once WITHOUT --resume.
+_TRANSCRIPT_ROTATE_BYTES = int(os.environ.get("AI_RELAY_TRANSCRIPT_ROTATE_BYTES", 5 * 1024 * 1024))
+_RESUME_HANG_TIMEOUT = float(os.environ.get("AI_RELAY_RESUME_HANG_TIMEOUT", 90))
 
 
 class PerTurnRuntime(AgentRuntime):
@@ -89,6 +98,10 @@ class PerTurnRuntime(AgentRuntime):
         # what the NEXT turn will use; otherwise we report what's actually running.
         self._current_model: Optional[str] = None
         self._last_context_tokens: int = 0
+        # Auto-reset bookkeeping (transcript rotation + resume-hang watchdog).
+        self._last_event_at: float = 0.0
+        self._turn_got_result: bool = False
+        self._watchdog_task: Optional[asyncio.Task] = None
 
     # ── AgentRuntime interface ────────────────────────────────────────────────
 
@@ -157,12 +170,26 @@ class PerTurnRuntime(AgentRuntime):
         if prompt.strip() == "/status":
             await self._emit_status_summary()
             return
+        # /new (alias /clear): drop the resume pointer so the NEXT turn starts a
+        # fresh Claude conversation. Self-service reset for a bloated/stuck session.
+        if prompt.strip() in ("/new", "/clear"):
+            self._agent_session_id = None
+            logger.info("[per-turn:%s] /new — resume pointer cleared, next turn is fresh", self.session_id)
+            await self._events.put(RelayEvent(
+                type=EventType.RESPONSE,
+                session_id=self.session_id,
+                text="Started a fresh conversation. Your earlier chat history is still saved.",
+                metadata={"source": "new_conversation"},
+            ))
+            return
 
         async with self._turn_lock:
             await self._run_turn(msg)
 
     async def stop(self) -> None:
         self._stopped = True
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
         if self._reader_task:
             self._reader_task.cancel()
             try:
@@ -178,7 +205,7 @@ class PerTurnRuntime(AgentRuntime):
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    async def _run_turn(self, msg: dict[str, Any]) -> None:
+    async def _run_turn(self, msg: dict[str, Any], from_watchdog: bool = False) -> None:
         """Cancel previous reader, stop old subprocess, start a new one."""
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
@@ -192,6 +219,25 @@ class PerTurnRuntime(AgentRuntime):
                 await self._current.stop()
             except Exception:
                 pass
+
+        # Auto-rotation: if the on-disk transcript we'd resume is too large, start a
+        # FRESH conversation instead — a huge transcript makes --resume slow/hang.
+        if self._agent_session_id and not from_watchdog:
+            size = self._transcript_size(self._agent_session_id)
+            if size is not None and size > _TRANSCRIPT_ROTATE_BYTES:
+                logger.warning(
+                    "[per-turn:%s] transcript %.1fMB > %.1fMB cap — rotating to a fresh conversation",
+                    self.session_id, size / 1048576, _TRANSCRIPT_ROTATE_BYTES / 1048576,
+                )
+                self._agent_session_id = None
+                await self._events.put(RelayEvent(
+                    type=EventType.RESPONSE,
+                    session_id=self.session_id,
+                    text="Started a fresh context to keep things fast — your earlier chat history is still saved.",
+                    metadata={"source": "auto_rotate", "transcript_bytes": size},
+                ))
+
+        used_resume = self._agent_session_id is not None
 
         cmd = list(self._base_cmd)
         # Apply model override: replaces --model in the base command or appends it.
@@ -220,15 +266,27 @@ class PerTurnRuntime(AgentRuntime):
         await self._current.start()
         await self._current.handle_client_message(msg)
 
+        # Reset per-turn watchdog state.
+        self._turn_got_result = False
+        self._last_event_at = asyncio.get_event_loop().time()
         self._reader_task = asyncio.create_task(self._pump_turn(self._current))
+
+        # Resume-hang watchdog: only when we actually resumed (and not already a
+        # fresh-retry). If the resumed subprocess stalls after init, retry fresh.
+        if used_resume and not from_watchdog:
+            runtime = self._current
+            self._watchdog_task = asyncio.create_task(self._resume_watchdog(msg, runtime))
 
     async def _pump_turn(self, runtime: AgentRuntime) -> None:
         """Forward events from one turn's subprocess to the shared event queue."""
         try:
             while not self._stopped:
                 event = await runtime.read_event()
+                # Watchdog liveness: record that this turn is producing output.
+                self._last_event_at = asyncio.get_event_loop().time()
                 if event is None:
                     logger.debug("[per-turn:%s] turn EOF", self.session_id)
+                    self._turn_got_result = True
                     break
                 # Capture Claude's internal session_id for --resume on next turn.
                 if event.raw:
@@ -254,6 +312,8 @@ class PerTurnRuntime(AgentRuntime):
                             ))
                 await self._events.put(event)
                 # Accumulate cost/token totals from each turn's result message.
+                if event.raw and event.raw.get("type") == "result":
+                    self._turn_got_result = True
                 if event.raw and event.raw.get("type") == "result" and event.raw.get("subtype") == "success":
                     self._total_cost_usd += float(event.raw.get("total_cost_usd") or 0.0)
                     usage = event.raw.get("usage") or {}
@@ -283,6 +343,58 @@ class PerTurnRuntime(AgentRuntime):
                 session_id=self.session_id,
                 text=f"Relay error: {exc}",
             ))
+
+    def _transcript_path(self, claude_session_id: str) -> Optional[str]:
+        """Path to Claude Code's on-disk transcript for a conversation, or None.
+
+        Claude stores it at ~/.claude/projects/{cwd-with-slashes-and-dots-as-dashes}/
+        {session_id}.jsonl. Only meaningful for the Claude adapter.
+        """
+        if not claude_session_id or not self._cwd:
+            return None
+        enc = re.sub(r"[/.]", "-", self._cwd)
+        return os.path.join(os.path.expanduser("~/.claude/projects"), enc, f"{claude_session_id}.jsonl")
+
+    def _transcript_size(self, claude_session_id: str) -> Optional[int]:
+        """Size in bytes of the resume transcript, or None if not found/applicable."""
+        path = self._transcript_path(claude_session_id)
+        if not path:
+            return None
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return None
+
+    async def _resume_watchdog(self, msg: dict[str, Any], runtime: AgentRuntime) -> None:
+        """If a resumed turn stalls (no events for _RESUME_HANG_TIMEOUT after start)
+        without producing a result, kill it and retry once WITHOUT --resume."""
+        try:
+            await asyncio.sleep(_RESUME_HANG_TIMEOUT)
+            if self._stopped or self._turn_got_result:
+                return
+            if runtime is not self._current:
+                return  # a newer turn already superseded this one
+            idle = asyncio.get_event_loop().time() - self._last_event_at
+            if idle < _RESUME_HANG_TIMEOUT:
+                return  # still producing output → genuinely long turn, leave it
+            logger.warning(
+                "[per-turn:%s] resumed turn stalled %.0fs with no result — retrying fresh",
+                self.session_id, idle,
+            )
+            await self._events.put(RelayEvent(
+                type=EventType.RESPONSE,
+                session_id=self.session_id,
+                text="The previous conversation was too large to resume — started a fresh context and retried. Your earlier chat history is still saved.",
+                metadata={"source": "resume_hang_retry"},
+            ))
+            self._agent_session_id = None  # force a fresh conversation
+            async with self._turn_lock:
+                if not self._stopped and runtime is self._current:
+                    await self._run_turn(msg, from_watchdog=True)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("[per-turn:%s] resume watchdog error: %s", self.session_id, exc)
 
     async def _emit_cost_summary(self) -> None:
         lines = [
