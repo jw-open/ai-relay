@@ -2,6 +2,10 @@
 
 > WebSocket relay that bridges AI coding agent CLIs (Claude Code, Codex, Gemini CLI, Snowflake Cortex, and more) to any web interface — stream reasoning, tool calls, and file changes in real time.
 
+![ai-relay demo — a coding agent building a live interactive dashboard in the browser, streamed over WebSocket](https://raw.githubusercontent.com/jw-open/agent-relay/main/assets/demo.gif)
+
+*Above: Claude Code, driven through ai-relay, builds and renders a live interactive dashboard in a browser — reasoning, tool calls, and the finished artifact streamed in real time.*
+
 ## Install
 
 ```bash
