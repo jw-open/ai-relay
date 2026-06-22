@@ -106,6 +106,7 @@ class PerTurnRuntime(AgentRuntime):
         # Auto-reset bookkeeping (resume-hang watchdog).
         self._last_event_at: float = 0.0
         self._turn_got_result: bool = False
+        self._turn_saw_result: bool = False  # a real `result` event arrived (vs abrupt EOF)
         self._turn_progress: int = 0  # non-init events seen this turn
         self._watchdog_task: Optional[asyncio.Task] = None
 
@@ -274,6 +275,7 @@ class PerTurnRuntime(AgentRuntime):
 
         # Reset per-turn watchdog state.
         self._turn_got_result = False
+        self._turn_saw_result = False
         self._turn_progress = 0  # count of non-init events; 0 after timeout ⇒ hung resume
         self._last_event_at = asyncio.get_event_loop().time()
         self._reader_task = asyncio.create_task(self._pump_turn(self._current))
@@ -294,6 +296,20 @@ class PerTurnRuntime(AgentRuntime):
                 if event is None:
                     logger.debug("[per-turn:%s] turn EOF", self.session_id)
                     self._turn_got_result = True
+                    # Abrupt exit: the subprocess ended WITHOUT a final `result` event
+                    # (crash / OOM / hard kill). Emit a turn-end so the client clears its
+                    # "working" indicator instead of hanging on it indefinitely.
+                    if not self._turn_saw_result and not self._stopped:
+                        logger.warning(
+                            "[per-turn:%s] subprocess exited with no result — emitting turn-end",
+                            self.session_id,
+                        )
+                        await self._events.put(RelayEvent(
+                            type=EventType.RESPONSE,
+                            session_id=self.session_id,
+                            text="⚠️ The agent process ended unexpectedly before finishing this turn. Your conversation is saved — send another message to continue.",
+                            metadata={"source": "subprocess_exit_no_result"},
+                        ))
                     break
                 # Count real model output (anything that's not the system/init line) as
                 # progress — a hung resume emits ONLY init, so progress stays 0.
@@ -327,6 +343,7 @@ class PerTurnRuntime(AgentRuntime):
                 # Accumulate cost/token totals from each turn's result message.
                 if event.raw and event.raw.get("type") == "result":
                     self._turn_got_result = True
+                    self._turn_saw_result = True
                 if event.raw and event.raw.get("type") == "result" and event.raw.get("subtype") == "success":
                     self._total_cost_usd += float(event.raw.get("total_cost_usd") or 0.0)
                     usage = event.raw.get("usage") or {}
